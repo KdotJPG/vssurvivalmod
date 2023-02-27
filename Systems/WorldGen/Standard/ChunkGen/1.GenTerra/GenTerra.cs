@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
 using Vintagestory.API.Datastructures;
@@ -21,11 +22,10 @@ namespace Vintagestory.ServerMods
         Dictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion = new Dictionary<int, LerpedWeightedIndex2DMap>(10);
 
         SimplexNoise distort2dx;
-        NormalizedSimplexNoise geoUpheavaldy;
-        NormalizedSimplexNoise geoOceandy;
-        float oceanessStrengthInv;
-
         SimplexNoise distort2dz;
+        NormalizedSimplexNoise geoUpheavalNoise;
+        NormalizedSimplexNoise geoOceanNoise;
+        float oceanicityStrengthInv;
 
         // We generate the whole terrain here so we instantly know the heightmap
         const int lerpHor = TerraGenConfig.lerpHorizontal;
@@ -82,11 +82,11 @@ namespace Vintagestory.ServerMods
             ITreeAttribute worldConfig = api.WorldManager.SaveGame.WorldConfiguration;
             float str = worldConfig.GetString("oceanessStrength", "0").ToFloat(0);
 
-            // oceanessStrengthInv = 0       => everywhere ocean
-            // oceanessStrengthInv = 0.65    => common oceans
-            // oceanessStrengthInv = 0.85    => rare
-            // oceanessStrengthInv = 1       => no oceans
-            oceanessStrengthInv = GameMath.Clamp(1 - str, 0, 1);
+            // oceanicityStrengthInv = 0       => everywhere ocean
+            // oceanicityStrengthInv = 0.65    => common oceans
+            // oceanicityStrengthInv = 0.85    => rare
+            // oceanicityStrengthInv = 1       => no oceans
+            oceanicityStrengthInv = GameMath.Clamp(1 - str, 0, 1);
         }
 
         private void loadGamePre()
@@ -100,7 +100,7 @@ namespace Vintagestory.ServerMods
         int terrainGenOctaves = 9;
         double[] lerpedAmps;
         double[] lerpedTh;
-        int[] disty = new int[4];
+        float[] distY = new float[4];
         
         double[,][] distxz = new double[2, 2][];
         double[] distxz00, distxz01, distxz10, distxz11;
@@ -154,16 +154,16 @@ namespace Vintagestory.ServerMods
                 scaleAdjustedFreqs(new double[] { 1 / 5.0, 1 / 2.50, 1 / 1.250, 1 / 0.65 }, noiseScale), 
                 api.World.Seed + 9876 + 0
             );
-            geoUpheavaldy = new NormalizedSimplexNoise(
+            geoUpheavalNoise = new NormalizedSimplexNoise(
                 new double[] { 55, 40, 30, 10, 2 },
                 scaleAdjustedFreqs(new double[] { 1 / 5.0 / 1.1, 1 / 2.50 / 1.1, 1 / 1.250 / 1.1, 1 / 0.65 / 1.1, 4 }, noiseScale), 
                 api.World.Seed + 9876 + 1
             );
 
-            geoOceandy = NormalizedSimplexNoise.FromDefaultOctaves(6, 1 / 60.0, 0.8, api.World.Seed + 9856 + 1);
+            geoOceanNoise = NormalizedSimplexNoise.FromDefaultOctaves(6, 1 / 60.0, 0.8, api.World.Seed + 9856 + 1);
 
             // Find a non-oceanic spot
-            if (api.WorldManager.SaveGame.IsNew && oceanessStrengthInv < 1)
+            if (api.WorldManager.SaveGame.IsNew && oceanicityStrengthInv < 1)
             {
                 var rnd = new Random(api.World.Seed + 2837986);
                 BlockPos pos = new BlockPos(api.WorldManager.MapSizeX / 2, 0, api.WorldManager.MapSizeZ / 2);
@@ -174,10 +174,10 @@ namespace Vintagestory.ServerMods
                     continentalNoiseOffsetX = (10 * tries) / 400.0 * (1 - 2 * rnd.Next(2));
                     continentalNoiseOffsetZ = (10 * tries) / 400.0 * (1 - 2 * rnd.Next(2));
 
-                    var noiseVal = (int)Math.Max(0, 255 * Math.Min(1, 2 * geoOceandy.Noise(
+                    var noiseVal = (int)Math.Max(0, 255 * Math.Min(1, 2 * geoOceanNoise.Noise(
                         continentalNoiseOffsetX + pos.X / 400.0,
                         continentalNoiseOffsetZ + pos.Z / 400.0
-                    ) - oceanessStrengthInv));
+                    ) - oceanicityStrengthInv));
                     
                     if (noiseVal <= 0)
                     {
@@ -347,28 +347,27 @@ namespace Vintagestory.ServerMods
                             double distx = GameMath.BiLerp(distxz00[0], distxz10[0], distxz01[0], distxz11[0], (double)(xN + dx) / noiseWidth, (double)(zN + dz) / noiseWidth);
                             double distz = GameMath.BiLerp(distxz00[1], distxz10[1], distxz01[1], distxz11[1], (double)(xN + dx) / noiseWidth, (double)(zN + dz) / noiseWidth);
 
-                            double oceannes = oceanessStrengthInv >= 1 ? -255 : 255 * Math.Min(1, 2 * geoOceandy.Noise(
+                            float oceanicity = oceanicityStrengthInv >= 1 ? -255 : 255 * Math.Min(1, 2 * (float)geoOceanNoise.Noise(
                                 continentalNoiseOffsetX + (chunkX * chunksize + (xN + dx) * lerpHor) / 400.0,
                                 continentalNoiseOffsetZ + (chunkZ * chunksize + (zN + dz) * lerpHor) / 400.0
-                            ) - oceanessStrengthInv);
+                            ) - oceanicityStrengthInv);
 
-                            int distyhere;
+                            float distYHere;
 
-                            if (oceannes < 0)
+                            if (oceanicity < 0)
                             {
-                                double upHeavelStrength = GameMath.BiLerp(upheavelMapUpLeft, upheavelMapUpRight, upheavelMapBotLeft, upheavelMapBotRight, (double)(xN + dx) / noiseWidth, (double)(zN + dz) / noiseWidth);
-
-                                double str = Math.Min(1, -oceannes * 10.0 / 255.0);
-                                distyhere = -(int)(str * upHeavelStrength * Math.Max(0, geoUpheavaldy.Noise((chunkX * chunksize + (xN + dx) * lerpHor + distx) / 400.0, (chunkZ * chunksize + (zN + dz) * lerpHor + distz) / 400.0) - 0.5));
+                                float upheavalStrength = GameMath.BiLerp(upheavelMapUpLeft, upheavelMapUpRight, upheavelMapBotLeft, upheavelMapBotRight, (xN + dx) * (1.0f / noiseWidth), (zN + dz) * (1.0f / noiseWidth));
+                                float strength = Math.Min(1, -oceanicity * (10.0f / 255.0f));
+                                distYHere = -(strength * upheavalStrength * Math.Max(0, (float)geoUpheavalNoise.Noise((chunkX * chunksize + (xN + dx) * lerpHor + distx) / 400.0, (chunkZ * chunksize + (zN + dz) * lerpHor + distz) / 400.0) - 0.5f));
                             }
                             else
                             {
-                                distyhere = (int)oceannes;
+                                distYHere = oceanicity;
                             }
 
                             // Positive values = submerge terrain
                             // Negative values = raise terrain
-                            disty[dz * 2 + dx] = distyhere;
+                            distY[dz * 2 + dx] = distYHere;
                         }
                     }
 
@@ -406,16 +405,10 @@ namespace Vintagestory.ServerMods
                                 double tnoiseGainX0 = (tnoiseY2 - tnoiseY0) * lerpDeltaHor;
                                 double tnoiseGainX1 = (tnoiseY3 - tnoiseY1) * lerpDeltaHor;
 
-                                // Landform thresholds lerp
-                                int distortedposY0 = GameMath.Clamp(posY + disty[0], 0, mapsizeYm1);
-                                thNoiseX0 = terrainThresholdsX0[distortedposY0];
-                                int distortedposY2 = GameMath.Clamp(posY + disty[2], 0, mapsizeYm1);
-                                thNoiseX1 = terrainThresholdsX2[distortedposY2];
-
-                                int distortedposY1 = GameMath.Clamp(posY + disty[1], 0, mapsizeYm1);
-                                double thNoiseY2 = terrainThresholdsX1[distortedposY1];
-                                int distortedposY3 = GameMath.Clamp(posY + disty[3], 0, mapsizeYm1);
-                                double thNoiseY3 = terrainThresholdsX3[distortedposY3];
+                                thNoiseX0 = SampleDisplacedYThreshold(posY + distY[0], mapsizeY - 2, terrainThresholdsX0);
+                                thNoiseX1 = SampleDisplacedYThreshold(posY + distY[2], mapsizeY - 2, terrainThresholdsX2);
+                                double thNoiseY2 = SampleDisplacedYThreshold(posY + distY[1], mapsizeY - 2, terrainThresholdsX1);
+                                double thNoiseY3 = SampleDisplacedYThreshold(posY + distY[3], mapsizeY - 2, terrainThresholdsX3);
 
                                 if (posY >= TerraGenConfig.seaLevel && Math.Max(Math.Max(tnoiseY0, tnoiseY1), Math.Max(tnoiseY2, tnoiseY3)) <= Math.Min(Math.Min(thNoiseX0, thNoiseX1), Math.Min(thNoiseY2, thNoiseY3)))
                                 {
@@ -443,9 +436,11 @@ namespace Vintagestory.ServerMods
                                             int lZ = zN * lerpHor + z;
 
                                             double geoUpheavelTaper = 0;
-                                            if (posY > taperThreshold && disty[0] <- 2)
+                                            double distYHere = GameMath.BiLerp(distY[0], distY[1], distY[2], distY[3], x * lerpDeltaHor, z * lerpDeltaHor);
+                                            if (posY > taperThreshold && distYHere < -2)
                                             {
-                                                double upheavelness = -(GameMath.BiLerp(distortedposY0, distortedposY1, distortedposY2, distortedposY3, x * lerpDeltaHor, z * lerpDeltaHor) - posY) / geoUpheavalAmplitude;
+                                                double negativeClampedDistY = GameMath.Clamp(-distYHere, posY - mapsizeY, posY);
+                                                double upheavelness = negativeClampedDistY / geoUpheavalAmplitude;
                                                 double ceilingness = (posY - taperThreshold) / 10.0;
                                                 geoUpheavelTaper = ceilingness * upheavelness / 4.0;
                                             }
@@ -567,7 +562,17 @@ namespace Vintagestory.ServerMods
             }    
         }
 
-        
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        float SampleDisplacedYThreshold(float distortedPosY, int mapSizeYm2, float[] thresholds)
+        {
+            int distortedPosYBase = (int)Math.Floor(distortedPosY);
+            int yBase = GameMath.Clamp(distortedPosYBase, 0, mapSizeYm2);
+            float ySlide = distortedPosY - distortedPosYBase;
+            return GameMath.Lerp(thresholds[yBase], thresholds[yBase + 1], ySlide);
+        }
+
+
         double[] GetTerrainNoise3D(double[] octX0, double[] octX1, double[] octX2, double[] octX3, double[] octThX0, double[] octThX1, double[] octThX2, double[] octThX3, int xPos, int yPos, int zPos)
         {
             for (int x = 0; x < paddedNoiseWidth; x++)
@@ -610,16 +615,19 @@ namespace Vintagestory.ServerMods
 
 
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int ChunkIndex3d(int x, int y, int z)
         {
             return (y * chunksize + z) * chunksize + x;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int ChunkIndex2d(int x, int z)
         {
             return z * chunksize + x;
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int NoiseIndex3d(int x, int y, int z)
         {
             return (y * paddedNoiseWidth + z) * paddedNoiseWidth + x;
