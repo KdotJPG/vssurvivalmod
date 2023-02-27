@@ -18,9 +18,14 @@ namespace Vintagestory.ServerMods
             GridTrilerp,
             FullNoise
         }
-        Mode mode = Mode.GridTrilerp;
+        Mode mode = Mode.FullNoise;
 
         ICoreServerAPI api;
+
+        const double terrainDistortionMultiplier = 4.0;
+        const double terrainDistortionThreshold = 40.0;
+        const double geoDistortionMultiplier = 10.0;
+        const double geoDistortionThreshold = 10.0;
 
         LandformsWorldProperty landforms;
         Dictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion = new Dictionary<int, LerpedWeightedIndex2DMap>(10);
@@ -117,6 +122,16 @@ namespace Vintagestory.ServerMods
             lerpedAmps = new double[terrainGenOctaves];
             lerpedTh = new double[terrainGenOctaves];
 
+            // Enabling FullNoise mode for 1.18 worlds and on.
+            if (GameVersion.IsAtLeastVersion(api.WorldManager.SaveGame.CreatedGameVersion, "1.18.0-pre.1"))
+            {
+                mode = Mode.FullNoise;
+            }
+            else
+            {
+                mode = Mode.GridTrilerp;
+            }
+
             switch (mode)
             {
                 case Mode.FullNoise:
@@ -136,8 +151,9 @@ namespace Vintagestory.ServerMods
                     distY = new float[paddedNoiseWidth * paddedNoiseWidth];
                     break;
             }
-
+            
             // Until v1.18.0, a few key calculations used paddedNoiseWidth when they should have used noiseWidth.
+            // If trilerp is still enabled, then this will fix that from now on.
             if (GameVersion.IsAtLeastVersion(api.WorldManager.SaveGame.CreatedGameVersion, "1.18.0-pre.1"))
             {
                 previouslyPaddedNoiseWidth = noiseWidth;
@@ -281,9 +297,116 @@ namespace Vintagestory.ServerMods
             switch (mode)
             {
                 case Mode.FullNoise:
+                    float chunkBlockDelta = 1.0f / chunksize;
+                    float chunkPixelBlockStep = chunkPixelSize * chunkBlockDelta;
+                    double verticalNoiseRelativeFrequency = 0.5 / TerraGenConfig.terrainNoiseVerticalScale;
 
-                    // TODO
+                    for (int lZ = 0; lZ < chunksize; lZ++)
+                    {
+                        int worldZ = chunkZ * chunksize + lZ;
+                        for (int lX = 0; lX < chunksize; lX++)
+                        {
+                            int worldX = chunkX * chunksize + lX;
 
+                            WeightedIndex[] columnWeightedIndices = landLerpMap[baseX + lX * chunkPixelBlockStep, baseZ + lZ * chunkPixelBlockStep];
+                            for (int i = 0; i < terrainGenOctaves; i++)
+                            {
+                                lerpedAmps[i] = GameMath.BiLerp(octNoiseX0[i], octNoiseX1[i], octNoiseX2[i], octNoiseX3[i], lX * chunkBlockDelta, lZ * chunkBlockDelta);
+                                lerpedTh[i] = GameMath.BiLerp(octThX0[i], octThX1[i], octThX2[i], octThX3[i], lX * chunkBlockDelta, lZ * chunkBlockDelta);
+                            }
+
+                            // Create that directional compression effect.
+                            VectorXZ dist = DistortionNoise(worldX, worldZ);
+                            VectorXZ distTerrain = ApplyDistortionThreshold(dist * terrainDistortionMultiplier, terrainDistortionThreshold);
+                            VectorXZ distGeo = ApplyDistortionThreshold(dist * geoDistortionMultiplier, geoDistortionThreshold);
+
+                            // Get Y distortion from oceanicity and upheaval
+                            float upHeavalStrength = GameMath.BiLerp(upheavalMapUpLeft, upheavalMapUpRight, upheavalMapBotLeft, upheavalMapBotRight, lX * chunkBlockDelta, lZ * chunkBlockDelta);
+                            float distY = ComputeOceanAndUpheavalDistY(upHeavalStrength, worldX, worldZ, distGeo);
+
+                            // Prepare the noise for the entire column.
+                            NormalizedSimplexNoise.ColumnNoise columnNoise = terrainNoise.ForColumn(verticalNoiseRelativeFrequency, lerpedAmps, lerpedTh, worldX + distTerrain.X, worldZ + distTerrain.Z);
+
+                            int chunkY = 0;
+                            int lY = 1;
+                            IChunkBlocks chunkBlockData = chunks[chunkY].Data;
+                            chunks[0].Data[ChunkIndex3d(lX, 0, lZ)] = GlobalConfig.mantleBlockId;
+                            for (int posY = 1; posY < mapsizeY - 1; posY++)
+                            {
+                                // Setup a lerp between threshold values, so that distortY can be applied continuously there.
+                                StartSampleDisplacedYThreshold(posY + distY, mapsizeYm2, out int distortedPosYBase, out float distortedPosYSlide);
+
+                                // Value starts as the landform Y threshold.
+                                double threshold = 0;
+                                for (int i = 0; i < columnWeightedIndices.Length; i++)
+                                {
+                                    // Sample the two values to lerp between. The value of distortedPosYBase is clamped in such a way that this always works.
+                                    // Underflow and overflow of distortedPosY result in linear extrapolation.
+                                    float[] thresholds = landforms.LandFormsByIndex[columnWeightedIndices[i].Index].TerrainYThresholds;
+                                    float thresholdValue = ContinueSampleDisplacedYThreshold(distortedPosYBase, distortedPosYSlide, thresholds);
+                                    threshold += thresholdValue * columnWeightedIndices[i].Weight;
+                                }
+
+                                // Geo Upheaval modifier for threshold
+                                double geoUpheavalTaper = ComputeGeoUpheavalTaper(posY, distY, taperThreshold, geoUpheavalAmplitude, mapsizeY);
+                                threshold += geoUpheavalTaper;
+
+                                // Often we don't need to calculate the noise.
+                                // First case also catches NaN if it were to ever happen.
+                                double noiseSign;
+                                if (!(threshold < columnNoise.BoundMax)) noiseSign = double.NegativeInfinity;
+                                else if (threshold <= columnNoise.BoundMin) noiseSign = double.PositiveInfinity;
+
+                                // But sometimes we do.
+                                else
+                                {
+                                    noiseSign = -NormalizedSimplexNoise.NoiseValueCurveInverse(threshold);
+                                    noiseSign = columnNoise.NoiseSign(posY, noiseSign);
+
+                                    // If it ever comes up to change the noise formula to one that's less trivial to layer-skip-optimize,
+                                    // Replace the above-two lines with the one below.
+                                    //noiseSign = columnNoise.Noise(posY) - threshold;
+                                }
+
+                                int mapIndex = ChunkIndex2d(lX, lZ);
+                                int chunkIndex = ChunkIndex3d(lX, lY, lZ);
+
+                                if (noiseSign > 0)
+                                {
+                                    terrainheightmap[mapIndex] = (ushort)posY;
+                                    rainheightmap[mapIndex] = (ushort)posY;
+                                    chunkBlockData[chunkIndex] = rockID;
+                                }
+                                else if (posY < TerraGenConfig.seaLevel)
+                                {
+                                    rainheightmap[mapIndex] = (ushort)posY;
+
+                                    int blockId;
+                                    if (posY == TerraGenConfig.seaLevel - 1)
+                                    {
+                                        int temp = (GameMath.BiLerpRgbColor(lX * chunkBlockDelta, lZ * chunkBlockDelta, climateUpLeft, climateUpRight, climateBotLeft, climateBotRight) >> 16) & 0xFF;
+                                        float distort = (float)distort2dx.Noise(worldX, worldZ) / 20f;
+                                        float tempf = TerraGenConfig.GetScaledAdjustedTemperatureFloat(temp, 0) + distort;
+                                        blockId = (tempf < TerraGenConfig.WaterFreezingTempOnGen) ? GlobalConfig.lakeIceBlockId : waterID;
+                                    }
+                                    else
+                                    {
+                                        blockId = waterID;
+                                    }
+
+                                    chunkBlockData.SetFluid(chunkIndex, blockId);
+                                }
+
+                                lY++;
+                                if (lY == chunksize)
+                                {
+                                    lY = 0;
+                                    chunkY++;
+                                    chunkBlockData = chunks[chunkY].Data;
+                                }
+                            }
+                        }
+                    }
                     break;
 
                 case Mode.GridTrilerp:
@@ -315,7 +438,7 @@ namespace Vintagestory.ServerMods
                         for (int zN = 0; zN < paddedNoiseWidth; zN++)
                         {
                             VectorXZ distGeo = DistortionNoise(chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor);
-                            distGeo = ApplyDistortionThreshold(distGeo * 10.0, 10.0);
+                            distGeo = ApplyDistortionThreshold(distGeo * geoDistortionMultiplier, geoDistortionThreshold);
 
                             float upheavalStrength = GameMath.BiLerp(upheavalMapUpLeft, upheavalMapUpRight, upheavalMapBotLeft, upheavalMapBotRight,
                                 xN * (1.0f / noiseWidth), zN * (1.0f / noiseWidth));
@@ -527,12 +650,24 @@ namespace Vintagestory.ServerMods
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        float SampleDisplacedYThreshold(float distortedPosY, int mapSizeYm2, float[] thresholds)
+        void StartSampleDisplacedYThreshold(float distortedPosY, int mapSizeYm2, out int yBase, out float ySlide)
         {
             int distortedPosYBase = (int)Math.Floor(distortedPosY);
-            int yBase = GameMath.Clamp(distortedPosYBase, 0, mapSizeYm2);
-            float ySlide = distortedPosY - distortedPosYBase;
+            yBase = GameMath.Clamp(distortedPosYBase, 0, mapSizeYm2);
+            ySlide = distortedPosY - distortedPosYBase;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        float ContinueSampleDisplacedYThreshold(int yBase, float ySlide, float[] thresholds)
+        {
             return GameMath.Lerp(thresholds[yBase], thresholds[yBase + 1], ySlide);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        float SampleDisplacedYThreshold(float distortedPosY, int mapSizeYm2, float[] thresholds)
+        {
+            StartSampleDisplacedYThreshold(distortedPosY, mapSizeYm2, out int yBase, out float ySlide);
+            return ContinueSampleDisplacedYThreshold(yBase, ySlide, thresholds);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -606,7 +741,7 @@ namespace Vintagestory.ServerMods
                     int worldZ = gridZ * lerpHor;
 
                     VectorXZ distTerrain = DistortionNoise(worldX, worldZ);
-                    distTerrain = ApplyDistortionThreshold(distTerrain * 4.0, 40.0);
+                    distTerrain = ApplyDistortionThreshold(distTerrain * terrainDistortionMultiplier, terrainDistortionThreshold);
 
                     for (int y = 0; y < paddedNoiseHeight; y++)
                     {
