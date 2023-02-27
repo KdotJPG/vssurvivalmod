@@ -123,7 +123,7 @@ namespace Vintagestory.ServerMods
             terrainGenOctaves = TerraGenConfig.GetTerrainOctaveCount(api.WorldManager.MapSizeY);
 
             TerrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
-                terrainGenOctaves, 0.002 / noiseScale, 0.9, api.WorldManager.Seed
+                terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
             );
             lerpedAmps = new double[terrainGenOctaves];
             lerpedTh = new double[terrainGenOctaves];
@@ -320,8 +320,8 @@ namespace Vintagestory.ServerMods
             {
                 for (int dz = 0; dz <= 1; dz++)
                 {
-                    float distx = (float)distort2dx.Noise((chunkX + dx) * (noiseWidth / 100.0), (chunkZ + dz) * (noiseWidth / 100.0)) * 10;
-                    float distz = (float)distort2dz.Noise((chunkX + dx) * (noiseWidth / 100.0), (chunkZ + dz) * (noiseWidth / 100.0)) * 10;
+                    float distx = (float)distort2dx.Noise((chunkX + dx) * (chunksize / 400.0), (chunkZ + dz) * (chunksize / 400.0)) * 10;
+                    float distz = (float)distort2dz.Noise((chunkX + dx) * (chunksize / 400.0), (chunkZ + dz) * (chunksize / 400.0)) * 10;
                     distx = (distx > 0 ? Math.Max(0, distx - 10) : Math.Min(0, distx + 10));
                     distz = (distz > 0 ? Math.Max(0, distz - 10) : Math.Min(0, distz + 10));
 
@@ -580,17 +580,24 @@ namespace Vintagestory.ServerMods
                         lerpedTh[i] = GameMath.BiLerp(octThX0[i], octThX1[i], octThX2[i], octThX3[i], (double)x / previouslyPaddedNoiseWidth, (double)z / previouslyPaddedNoiseWidth);
                     }
 
-                    double nx = (xPos + x) / 100.0;
-                    double nz = (zPos + z) / 100.0;
-                    float distx = (float)distort2dx.Noise(nx, nz);
-                    float distz = (float)distort2dz.Noise(nx, nz);
+                    int gridX = xPos + x;
+                    int gridZ = zPos + z;
+                    int worldX = gridX * lerpHor;
+                    int worldZ = gridZ * lerpHor;
+                    double distNoiseX = gridX * (lerpHor / 400.0);
+                    double distNoiseZ = gridZ * (lerpHor / 400.0);
+
+                    double distX = distort2dx.Noise(distNoiseX, distNoiseZ) * 4.0;
+                    double distZ = distort2dz.Noise(distNoiseX, distNoiseZ) * 4.0;
+                    distX = distX > 0 ? Math.Max(0, distX - 40) : Math.Min(0, distX + 40);
+                    distZ = distZ > 0 ? Math.Max(0, distZ - 40) : Math.Min(0, distZ + 40);
 
                     for (int y = 0; y < paddedNoiseHeight; y++)
                     {
                         noiseTemp[NoiseIndex3d(x, y, z)] = TerrainNoise.Noise(
-                            (xPos + x) + (distx > 0 ? Math.Max(0, distx - 10) : Math.Min(0, distx + 10)),
-                            (yPos + y) / (TerraGenConfig.terrainNoiseVerticalScale),
-                            (zPos + z) + (distz > 0 ? Math.Max(0, distz - 10) : Math.Min(0, distz + 10)),
+                            worldX + distX,
+                            (yPos + y) * (lerpVer * 0.5 / TerraGenConfig.terrainNoiseVerticalScale),
+                            worldZ + distZ,
                             lerpedAmps,
                             lerpedTh
                         );
