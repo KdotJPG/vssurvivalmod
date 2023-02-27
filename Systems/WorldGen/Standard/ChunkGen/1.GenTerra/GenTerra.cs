@@ -37,6 +37,9 @@ namespace Vintagestory.ServerMods
         const float lerpDeltaHor = 1f / lerpHor;
         const float lerpDeltaVert = 1f / lerpVer;
 
+        [Obsolete] int previouslyPaddedNoiseWidth;
+        [Obsolete] float previouslyWeirdMultiplier;
+
         double[] noiseTemp;
         float noiseScale;
 
@@ -131,6 +134,18 @@ namespace Vintagestory.ServerMods
 
             paddedNoiseWidth = noiseWidth + 1;
             paddedNoiseHeight = noiseHeight + 1;
+
+            // Until v1.18.0, a few key calculations used paddedNoiseWidth when they should have used noiseWidth.
+            if (GameVersion.IsAtLeastVersion(api.WorldManager.SaveGame.CreatedGameVersion, "1.18.0-pre.1"))
+            {
+                previouslyPaddedNoiseWidth = noiseWidth;
+                previouslyWeirdMultiplier = 1.0f;
+            }
+            else
+            {
+                previouslyPaddedNoiseWidth = paddedNoiseWidth;
+                previouslyWeirdMultiplier = (float)lerpHor / chunksize + 1.0f;
+            }
 
             noiseTemp = new double[paddedNoiseWidth * paddedNoiseWidth * paddedNoiseHeight];
 
@@ -258,16 +273,8 @@ namespace Vintagestory.ServerMods
             double[] octNoiseX0, octNoiseX1, octNoiseX2, octNoiseX3;
             double[] octThX0, octThX1, octThX2, octThX3;
 
-            // So it seems we have some kind of off-by-one error here? 
-            // When the slope of a mountain goes up (in positive z or x direction), particularly at large word heights (512+)
-            // then the last blocks (again in postive x/z dir) are below of where they should be?
-            // I have no idea why, but this 0.25f offset seems to greatly mitigate the issue
-
-            // I think its because GetTerrainNoise3D() picks up 4 extra blocks beyond the current chunk bounds, but we did not adjust the retrieval of noise data from GetInterpolatedOctaves() for it
-            // we ought to add 4/chunksize * chunkPixelSize to it... which just so happens to match our guessed value of 0.25f, lol.
-            float p = (float)lerpHor / chunksize;
-            float weirdOffset = p * chunkPixelSize; // 0.25f;
-            chunkPixelSize += weirdOffset;
+            // Correct chunk boundary errors prior to 1.18.0
+            chunkPixelSize *= previouslyWeirdMultiplier;
 
             GetInterpolatedOctaves(landLerpMap[baseX, baseZ], out octNoiseX0, out octThX0);
             GetInterpolatedOctaves(landLerpMap[baseX + chunkPixelSize, baseZ], out octNoiseX1, out octThX1);
@@ -313,8 +320,8 @@ namespace Vintagestory.ServerMods
             {
                 for (int dz = 0; dz <= 1; dz++)
                 {
-                    float distx = (float)distort2dx.Noise((chunkX * noiseWidth + dx * paddedNoiseWidth) / 100.0, (chunkZ * noiseWidth + dz * paddedNoiseWidth) / 100.0) * 10;
-                    float distz = (float)distort2dz.Noise((chunkX * noiseWidth + dx * paddedNoiseWidth) / 100.0, (chunkZ * noiseWidth + dz * paddedNoiseWidth) / 100.0) * 10;
+                    float distx = (float)distort2dx.Noise((chunkX + dx) * (noiseWidth / 100.0), (chunkZ + dz) * (noiseWidth / 100.0)) * 10;
+                    float distz = (float)distort2dz.Noise((chunkX + dx) * (noiseWidth / 100.0), (chunkZ + dz) * (noiseWidth / 100.0)) * 10;
                     distx = (distx > 0 ? Math.Max(0, distx - 10) : Math.Min(0, distx + 10));
                     distz = (distz > 0 ? Math.Max(0, distz - 10) : Math.Min(0, distz + 10));
 
@@ -337,8 +344,8 @@ namespace Vintagestory.ServerMods
                     {
                         for (int dz = 0; dz <= 1; dz++)
                         {
-                            double distx = GameMath.BiLerp(distxz00[0], distxz10[0], distxz01[0], distxz11[0], (double)(xN + dx) / paddedNoiseWidth, (double)(zN + dz) / paddedNoiseWidth);
-                            double distz = GameMath.BiLerp(distxz00[1], distxz10[1], distxz01[1], distxz11[1], (double)(xN + dx) / paddedNoiseWidth, (double)(zN + dz) / paddedNoiseWidth);
+                            double distx = GameMath.BiLerp(distxz00[0], distxz10[0], distxz01[0], distxz11[0], (double)(xN + dx) / noiseWidth, (double)(zN + dz) / noiseWidth);
+                            double distz = GameMath.BiLerp(distxz00[1], distxz10[1], distxz01[1], distxz11[1], (double)(xN + dx) / noiseWidth, (double)(zN + dz) / noiseWidth);
 
                             double oceannes = oceanessStrengthInv >= 1 ? -255 : 255 * Math.Min(1, 2 * geoOceandy.Noise(
                                 continentalNoiseOffsetX + (chunkX * chunksize + (xN + dx) * lerpHor) / 400.0,
@@ -569,8 +576,8 @@ namespace Vintagestory.ServerMods
                 {
                     for (int i = 0; i < terrainGenOctaves; i++)
                     {
-                        lerpedAmps[i] = GameMath.BiLerp(octX0[i], octX1[i], octX2[i], octX3[i], (double)x / paddedNoiseWidth, (double)z / paddedNoiseWidth);
-                        lerpedTh[i] = GameMath.BiLerp(octThX0[i], octThX1[i], octThX2[i], octThX3[i], (double)x / paddedNoiseWidth, (double)z / paddedNoiseWidth);
+                        lerpedAmps[i] = GameMath.BiLerp(octX0[i], octX1[i], octX2[i], octX3[i], (double)x / previouslyPaddedNoiseWidth, (double)z / previouslyPaddedNoiseWidth);
+                        lerpedTh[i] = GameMath.BiLerp(octThX0[i], octThX1[i], octThX2[i], octThX3[i], (double)x / previouslyPaddedNoiseWidth, (double)z / previouslyPaddedNoiseWidth);
                     }
 
                     double nx = (xPos + x) / 100.0;
