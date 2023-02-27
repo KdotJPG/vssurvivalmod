@@ -13,50 +13,57 @@ namespace Vintagestory.ServerMods
 {
     public class GenTerra : ModStdWorldGen
     {
-        ICoreServerAPI api;
-        int regionMapSize;
+        enum Mode
+        {
+            GridTrilerp,
+            FullNoise
+        }
+        Mode mode = Mode.GridTrilerp;
 
-        private NormalizedSimplexNoise TerrainNoise;
+        ICoreServerAPI api;
 
         LandformsWorldProperty landforms;
         Dictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion = new Dictionary<int, LerpedWeightedIndex2DMap>(10);
+        int regionMapSize;
+        float noiseScale;
+        int terrainGenOctaves = 9;
 
+        double continentalNoiseOffsetX;
+        double continentalNoiseOffsetZ;
+        float oceanicityStrengthInv;
+
+        NormalizedSimplexNoise terrainNoise;
         SimplexNoise distort2dx;
         SimplexNoise distort2dz;
         NormalizedSimplexNoise geoUpheavalNoise;
         NormalizedSimplexNoise geoOceanNoise;
-        float oceanicityStrengthInv;
 
-        // We generate the whole terrain here so we instantly know the heightmap
+        double[] lerpedAmps;
+        double[] lerpedTh;
+
+        // Used only by GridTrilerp mode
         const int lerpHor = TerraGenConfig.lerpHorizontal;
         const int lerpVer = TerraGenConfig.lerpVertical;
-        int noiseWidth;
-        int paddedNoiseWidth;
-        int paddedNoiseHeight;
-        int noiseHeight;
         const float lerpDeltaHor = 1f / lerpHor;
         const float lerpDeltaVert = 1f / lerpVer;
-
-        [Obsolete] int previouslyPaddedNoiseWidth;
-        [Obsolete] float previouslyWeirdMultiplier;
-
+        int noiseWidth;
+        int noiseHeight;
+        int paddedNoiseWidth;
+        int paddedNoiseHeight;
         double[] noiseTemp;
-        float noiseScale;
-
         float[] terrainThresholdsX0;
         float[] terrainThresholdsX1;
         float[] terrainThresholdsX2;
         float[] terrainThresholdsX3;
-
-        double continentalNoiseOffsetX;
-        double continentalNoiseOffsetZ;
+        float[] distY;
+        [Obsolete] int previouslyPaddedNoiseWidth;
+        [Obsolete] float previouslyWeirdMultiplier;
 
 
         public override bool ShouldLoad(EnumAppSide side)
         {
             return side == EnumAppSide.Server;
         }
-
 
         public override double ExecuteOrder()
         {
@@ -92,15 +99,10 @@ namespace Vintagestory.ServerMods
         private void loadGamePre()
         {
             if (api.WorldManager.SaveGame.WorldType != "standard") return;
-            
+
             TerraGenConfig.seaLevel = (int)(0.4313725490196078 * api.WorldManager.MapSizeY);
             api.WorldManager.SetSeaLevel(TerraGenConfig.seaLevel);
         }
-
-        int terrainGenOctaves = 9;
-        double[] lerpedAmps;
-        double[] lerpedTh;
-        float[] distY;
 
         public void initWorldGen()
         {
@@ -108,24 +110,32 @@ namespace Vintagestory.ServerMods
             LandformMapByRegion.Clear();
 
             chunksize = api.WorldManager.ChunkSize;
-
             regionMapSize = (int)Math.Ceiling((double)api.WorldManager.MapSizeX / api.WorldManager.RegionSize);
             noiseScale = Math.Max(1, api.WorldManager.MapSizeY / 256f);
-
             terrainGenOctaves = TerraGenConfig.GetTerrainOctaveCount(api.WorldManager.MapSizeY);
 
-            TerrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
-                terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
-            );
             lerpedAmps = new double[terrainGenOctaves];
             lerpedTh = new double[terrainGenOctaves];
 
+            switch (mode)
+            {
+                case Mode.FullNoise:
+                    break;
 
-            noiseWidth = chunksize / lerpHor;
-            noiseHeight = api.WorldManager.MapSizeY / lerpVer;
+                case Mode.GridTrilerp:
+                    noiseWidth = chunksize / lerpHor;
+                    noiseHeight = api.WorldManager.MapSizeY / lerpVer;
+                    paddedNoiseWidth = noiseWidth + 1;
+                    paddedNoiseHeight = noiseHeight + 1;
 
-            paddedNoiseWidth = noiseWidth + 1;
-            paddedNoiseHeight = noiseHeight + 1;
+                    terrainThresholdsX0 = new float[api.WorldManager.MapSizeY];
+                    terrainThresholdsX1 = new float[api.WorldManager.MapSizeY];
+                    terrainThresholdsX2 = new float[api.WorldManager.MapSizeY];
+                    terrainThresholdsX3 = new float[api.WorldManager.MapSizeY];
+                    noiseTemp = new double[paddedNoiseWidth * paddedNoiseWidth * paddedNoiseHeight];
+                    distY = new float[paddedNoiseWidth * paddedNoiseWidth];
+                    break;
+            }
 
             // Until v1.18.0, a few key calculations used paddedNoiseWidth when they should have used noiseWidth.
             if (GameVersion.IsAtLeastVersion(api.WorldManager.SaveGame.CreatedGameVersion, "1.18.0-pre.1"))
@@ -139,12 +149,12 @@ namespace Vintagestory.ServerMods
                 previouslyWeirdMultiplier = (float)lerpHor / chunksize + 1.0f;
             }
 
-            noiseTemp = new double[paddedNoiseWidth * paddedNoiseWidth * paddedNoiseHeight];
-            distY = new float[paddedNoiseWidth * paddedNoiseWidth];
-
+            terrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
+                terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
+            );
             distort2dx = new SimplexNoise(
-                new double[] { 55, 40, 30, 10 }, 
-                scaleAdjustedFreqs(new double[] { 1 / 5.0, 1 / 2.50, 1 / 1.250, 1 / 0.65 }, noiseScale), 
+                new double[] { 55, 40, 30, 10 },
+                scaleAdjustedFreqs(new double[] { 1 / 5.0, 1 / 2.50, 1 / 1.250, 1 / 0.65 }, noiseScale),
                 api.World.Seed + 9876 + 0
             );
             distort2dz = new SimplexNoise(
@@ -154,10 +164,9 @@ namespace Vintagestory.ServerMods
             );
             geoUpheavalNoise = new NormalizedSimplexNoise(
                 new double[] { 55, 40, 30, 10, 2 },
-                scaleAdjustedFreqs(new double[] { 1 / 5.0 / 1.1, 1 / 2.50 / 1.1, 1 / 1.250 / 1.1, 1 / 0.65 / 1.1, 4 }, noiseScale), 
+                scaleAdjustedFreqs(new double[] { 1 / 5.0 / 1.1, 1 / 2.50 / 1.1, 1 / 1.250 / 1.1, 1 / 0.65 / 1.1, 4 }, noiseScale),
                 api.World.Seed + 9876 + 1
             );
-
             geoOceanNoise = NormalizedSimplexNoise.FromDefaultOctaves(6, 1 / 60.0, 0.8, api.World.Seed + 9856 + 1);
 
             // Find a non-oceanic spot
@@ -176,7 +185,7 @@ namespace Vintagestory.ServerMods
                         continentalNoiseOffsetX + pos.X / 400.0,
                         continentalNoiseOffsetZ + pos.Z / 400.0
                     ) - oceanicityStrengthInv));
-                    
+
                     if (noiseVal <= 0)
                     {
                         api.WorldManager.SaveGame.StoreData<double>("continentalNoiseOffsetX", continentalNoiseOffsetX);
@@ -186,12 +195,7 @@ namespace Vintagestory.ServerMods
                 }
             }
 
-            terrainThresholdsX0 = new float[api.WorldManager.MapSizeY];
-            terrainThresholdsX1 = new float[api.WorldManager.MapSizeY];
-            terrainThresholdsX2 = new float[api.WorldManager.MapSizeY];
-            terrainThresholdsX3 = new float[api.WorldManager.MapSizeY];
-
-            api.Logger.VerboseDebug("Initialised GenTerra");
+            api.Logger.VerboseDebug("Initialised GenTerra (Mode={0})", mode);
         }
 
         private double[] scaleAdjustedFreqs(double[] vs, float horizontalScale)
@@ -204,8 +208,6 @@ namespace Vintagestory.ServerMods
             return vs;
         }
 
-
-        
 
         private void OnChunkColumnGen(IServerChunk[] chunks, int chunkX, int chunkZ, ITreeAttribute chunkGenParams = null)
         {
@@ -247,16 +249,14 @@ namespace Vintagestory.ServerMods
             int waterID = GlobalConfig.waterBlockId;
             int rockID = GlobalConfig.defaultRockId;
 
-
             IntDataMap2D landformMap = mapchunk.MapRegion.LandformMap;
-            // Amount of pixels for each chunk (probably 1, 2, or 4) in the land form map
+            // # of pixels for each chunk (probably 1, 2, or 4) in the land form map
             float chunkPixelSize = landformMap.InnerSize / regionChunkSize;
             // Adjusted lerp for the noiseWidth
             float chunkPixelStep = chunkPixelSize / noiseWidth;
             // Start coordinates for the chunk in the region map
             float baseX = (chunkX % regionChunkSize) * chunkPixelSize;
             float baseZ = (chunkZ % regionChunkSize) * chunkPixelSize;
-            
 
             LerpedWeightedIndex2DMap landLerpMap = GetOrLoadLerpedLandformMap(chunks[0].MapChunk, chunkX / regionChunkSize, chunkZ / regionChunkSize);
 
@@ -264,200 +264,205 @@ namespace Vintagestory.ServerMods
             double[] octNoiseX0, octNoiseX1, octNoiseX2, octNoiseX3;
             double[] octThX0, octThX1, octThX2, octThX3;
 
-            // Correct chunk boundary errors prior to 1.18.0
-            chunkPixelSize *= previouslyWeirdMultiplier;
-
             GetInterpolatedOctaves(landLerpMap[baseX, baseZ], out octNoiseX0, out octThX0);
             GetInterpolatedOctaves(landLerpMap[baseX + chunkPixelSize, baseZ], out octNoiseX1, out octThX1);
             GetInterpolatedOctaves(landLerpMap[baseX, baseZ + chunkPixelSize], out octNoiseX2, out octThX2);
             GetInterpolatedOctaves(landLerpMap[baseX + chunkPixelSize, baseZ + chunkPixelSize], out octNoiseX3, out octThX3);
 
-
-            double[] terrainNoise3d = GetTerrainNoise3D(octNoiseX0, octNoiseX1, octNoiseX2, octNoiseX3, octThX0, octThX1, octThX2, octThX3, chunkX * noiseWidth, 0, chunkZ * noiseWidth);
-
             // Store heightmap in the map chunk
             ushort[] rainheightmap = chunks[0].MapChunk.RainHeightMap;
             ushort[] terrainheightmap = chunks[0].MapChunk.WorldGenTerrainHeightMap;
-            
-
-            // Terrain thresholds
-            double tnoiseY0;
-            double tnoiseY1;
-            double tnoiseY2;
-            double tnoiseY3;
-            double tnoiseGainY0;
-            double tnoiseGainY1;
-            double tnoiseGainY2;
-            double tnoiseGainY3;
-
-
-            double thNoiseX0;
-            double thNoiseX1;
-            double thNoiseGainX0;
-            double thNoiseGainX1;
-            double thNoiseGainZ0;
-            double thNoiseZ0;
-
-            
-
-            
 
             int mapsizeY = api.WorldManager.MapSizeY;
-            int mapsizeYm1 = api.WorldManager.MapSizeY - 1;
+            int mapsizeYm2 = api.WorldManager.MapSizeY - 2;
             int taperThreshold = (int)(mapsizeY * 0.9f);
             double geoUpheavalAmplitude = 255;
 
-            for (int xN = 0; xN < paddedNoiseWidth; xN++)
+            switch (mode)
             {
-                for (int zN = 0; zN < paddedNoiseWidth; zN++)
-                {
-                    VectorXZ distGeo = DistortionNoise(chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor);
-                    distGeo = ApplyDistortionThreshold(distGeo * 10.0, 10.0);
+                case Mode.FullNoise:
 
-                    float upheavalStrength = GameMath.BiLerp(upheavalMapUpLeft, upheavalMapUpRight, upheavalMapBotLeft, upheavalMapBotRight,
-                        xN * (1.0f / noiseWidth), zN * (1.0f / noiseWidth));
-                    float distYHere = ComputeOceanAndUpheavalDistY(upheavalStrength,
-                                chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor,
-                                distGeo);
+                    // TODO
 
-                    distY[NoiseIndex2d(xN, zN)] = distYHere;
-                }
-            }
+                    break;
 
-            for (int xN = 0; xN < noiseWidth; xN++)
-            {
-                for (int zN = 0; zN < noiseWidth; zN++)
-                {
-                    // Landform terrain thresholds
-                    LoadInterpolatedThresholds(landLerpMap[baseX + xN * chunkPixelStep, baseZ + zN * chunkPixelStep], terrainThresholdsX0);
-                    LoadInterpolatedThresholds(landLerpMap[baseX + (xN+1) * chunkPixelStep, baseZ + zN * chunkPixelStep], terrainThresholdsX1);
-                    LoadInterpolatedThresholds(landLerpMap[baseX + xN * chunkPixelStep, baseZ + (zN+1) * chunkPixelStep], terrainThresholdsX2);
-                    LoadInterpolatedThresholds(landLerpMap[baseX + (xN+1) * chunkPixelStep, baseZ + (zN+1) * chunkPixelStep], terrainThresholdsX3);
+                case Mode.GridTrilerp:
 
-                    // Oceanicity/Upheaval Y displacements
-                    float distY0 = distY[NoiseIndex2d(xN, zN)];
-                    float distY1 = distY[NoiseIndex2d(xN + 1, zN)];
-                    float distY2 = distY[NoiseIndex2d(xN, zN + 1)];
-                    float distY3 = distY[NoiseIndex2d(xN + 1, zN + 1)];
+                    // Correct chunk boundary errors prior to 1.18.0
+                    chunkPixelSize *= previouslyWeirdMultiplier;
 
-                    for (int yN = 0; yN < noiseHeight; yN++)
+                    double[] terrainNoise3d = GetTerrainNoise3D(octNoiseX0, octNoiseX1, octNoiseX2, octNoiseX3, octThX0, octThX1, octThX2, octThX3, chunkX * noiseWidth, 0, chunkZ * noiseWidth);
+
+                    // Terrain thresholds
+                    double tnoiseY0;
+                    double tnoiseY1;
+                    double tnoiseY2;
+                    double tnoiseY3;
+                    double tnoiseGainY0;
+                    double tnoiseGainY1;
+                    double tnoiseGainY2;
+                    double tnoiseGainY3;
+
+                    double thNoiseX0;
+                    double thNoiseX1;
+                    double thNoiseGainX0;
+                    double thNoiseGainX1;
+                    double thNoiseGainZ0;
+                    double thNoiseZ0;
+
+                    for (int xN = 0; xN < paddedNoiseWidth; xN++)
                     {
-                        // Terrain noise
-                        tnoiseY0 = terrainNoise3d[NoiseIndex3d(xN, yN, zN)];
-                        tnoiseY1 = terrainNoise3d[NoiseIndex3d(xN, yN, zN + 1)];
-                        tnoiseY2 = terrainNoise3d[NoiseIndex3d(xN + 1, yN, zN)];
-                        tnoiseY3 = terrainNoise3d[NoiseIndex3d(xN + 1, yN, zN + 1)];
-
-                        tnoiseGainY0 = (terrainNoise3d[NoiseIndex3d(xN, yN + 1, zN)] - tnoiseY0) * lerpDeltaVert;
-                        tnoiseGainY1 = (terrainNoise3d[NoiseIndex3d(xN, yN + 1, zN + 1)] - tnoiseY1) * lerpDeltaVert;
-                        tnoiseGainY2 = (terrainNoise3d[NoiseIndex3d(xN + 1, yN + 1, zN)] - tnoiseY2) * lerpDeltaVert;
-                        tnoiseGainY3 = (terrainNoise3d[NoiseIndex3d(xN + 1, yN + 1, zN + 1)] - tnoiseY3) * lerpDeltaVert;
-
-                        for (int y = 0; y < lerpVer; y++)
+                        for (int zN = 0; zN < paddedNoiseWidth; zN++)
                         {
-                            int posY = yN * lerpVer + y;
-                            int chunkY = posY / chunksize;
-                            int localY = posY % chunksize;
-                            IChunkBlocks chunkBlockData = chunks[chunkY].Data;
+                            VectorXZ distGeo = DistortionNoise(chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor);
+                            distGeo = ApplyDistortionThreshold(distGeo * 10.0, 10.0);
 
-                            if (posY == 0)
-                            {
-                                int chunkIndex = ChunkIndex3d(xN * lerpHor, localY, zN * lerpHor);
-                                chunkBlockData.SetBlockBulk(chunkIndex, lerpHor, lerpHor, GlobalConfig.mantleBlockId);
-                            }
-                            else
-                            {
-                                // For Terrain noise 
-                                double tnoiseX0 = tnoiseY0;
-                                double tnoiseX1 = tnoiseY1;
+                            float upheavalStrength = GameMath.BiLerp(upheavalMapUpLeft, upheavalMapUpRight, upheavalMapBotLeft, upheavalMapBotRight,
+                                xN * (1.0f / noiseWidth), zN * (1.0f / noiseWidth));
+                            float distYHere = ComputeOceanAndUpheavalDistY(upheavalStrength,
+                                        chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor,
+                                        distGeo);
 
-                                double tnoiseGainX0 = (tnoiseY2 - tnoiseY0) * lerpDeltaHor;
-                                double tnoiseGainX1 = (tnoiseY3 - tnoiseY1) * lerpDeltaHor;
-
-                                thNoiseX0 = SampleDisplacedYThreshold(posY + distY0, mapsizeY - 2, terrainThresholdsX0);
-                                thNoiseX1 = SampleDisplacedYThreshold(posY + distY2, mapsizeY - 2, terrainThresholdsX2);
-                                double thNoiseY2 = SampleDisplacedYThreshold(posY + distY1, mapsizeY - 2, terrainThresholdsX1);
-                                double thNoiseY3 = SampleDisplacedYThreshold(posY + distY3, mapsizeY - 2, terrainThresholdsX3);
-
-                                if (posY >= TerraGenConfig.seaLevel && Math.Max(Math.Max(tnoiseY0, tnoiseY1), Math.Max(tnoiseY2, tnoiseY3)) <= Math.Min(Math.Min(thNoiseX0, thNoiseX1), Math.Min(thNoiseY2, thNoiseY3)))
-                                {
-                                    // Nothing to do: whole slice is air
-                                }
-                                else
-                                {
-                                    thNoiseGainX0 = (thNoiseY2 - thNoiseX0) * lerpDeltaHor;
-                                    thNoiseGainX1 = (thNoiseY3 - thNoiseX1) * lerpDeltaHor;
-
-                                    for (int x = 0; x < lerpHor; x++)
-                                    {
-                                        // For terrain noise
-                                        double tnoiseZ0 = tnoiseX0;
-                                        double tnoiseGainZ0 = (tnoiseX1 - tnoiseX0) * lerpDeltaHor;
-
-                                        // Landform
-                                        thNoiseZ0 = thNoiseX0;
-                                        thNoiseGainZ0 = (thNoiseX1 - thNoiseX0) * lerpDeltaHor;
-
-                                        int lX = xN * lerpHor + x;
-
-                                        for (int z = 0; z < lerpHor; z++)
-                                        {                                          
-                                            int lZ = zN * lerpHor + z;
-
-                                            // Geo Upheaval modifier for threshold
-                                            double distYHere = GameMath.BiLerp(distY0, distY2, distY1, distY3, x * lerpDeltaHor, z * lerpDeltaHor);
-                                            double geoUpheavalTaper = ComputeGeoUpheavalTaper(posY, distYHere, taperThreshold, geoUpheavalAmplitude, mapsizeY);
-
-                                            if (tnoiseZ0 > thNoiseZ0 + geoUpheavalTaper)
-                                            {
-                                                int mapIndex = ChunkIndex2d(lX, lZ);
-                                                terrainheightmap[mapIndex] = (ushort)posY;
-                                                rainheightmap[mapIndex] = (ushort)posY;
-
-                                                chunkBlockData[ChunkIndex3d(lX, localY, lZ)] = rockID;
-                                            }
-                                            else if (posY < TerraGenConfig.seaLevel)
-                                            {
-                                                int mapIndex = ChunkIndex2d(lX, lZ);
-                                                rainheightmap[mapIndex] = (ushort)posY;
-
-                                                int blockId;
-                                                if (posY == TerraGenConfig.seaLevel - 1)
-                                                {
-                                                    int temp = (GameMath.BiLerpRgbColor(((float)lX) / chunksize, ((float)lZ) / chunksize, climateUpLeft, climateUpRight, climateBotLeft, climateBotRight) >> 16) & 0xff;
-                                                    float distort = (float)distort2dx.Noise(chunkX * chunksize + lX, chunkZ * chunksize + lZ) / 20f;
-                                                    float tempf = TerraGenConfig.GetScaledAdjustedTemperatureFloat(temp, 0) + distort;
-
-                                                    blockId = (tempf < TerraGenConfig.WaterFreezingTempOnGen) ? GlobalConfig.lakeIceBlockId : waterID;
-                                                }
-                                                else
-                                                {
-                                                    blockId = waterID;
-                                                }
-
-                                                chunkBlockData.SetFluid(ChunkIndex3d(lX, localY, lZ), blockId);
-                                            }
-
-                                            tnoiseZ0 += tnoiseGainZ0;
-                                            thNoiseZ0 += thNoiseGainZ0;
-                                        }
-
-                                        tnoiseX0 += tnoiseGainX0;
-                                        thNoiseX0 += thNoiseGainX0;
-
-                                        tnoiseX1 += tnoiseGainX1;
-                                        thNoiseX1 += thNoiseGainX1;
-                                    }
-                                }
-                            }
-
-                            tnoiseY0 += tnoiseGainY0;
-                            tnoiseY1 += tnoiseGainY1;
-                            tnoiseY2 += tnoiseGainY2;
-                            tnoiseY3 += tnoiseGainY3;
+                            distY[NoiseIndex2d(xN, zN)] = distYHere;
                         }
                     }
-                }
+
+                    for (int xN = 0; xN < noiseWidth; xN++)
+                    {
+                        for (int zN = 0; zN < noiseWidth; zN++)
+                        {
+                            // Landform terrain thresholds
+                            LoadInterpolatedThresholds(landLerpMap[baseX + xN * chunkPixelStep, baseZ + zN * chunkPixelStep], terrainThresholdsX0);
+                            LoadInterpolatedThresholds(landLerpMap[baseX + (xN + 1) * chunkPixelStep, baseZ + zN * chunkPixelStep], terrainThresholdsX1);
+                            LoadInterpolatedThresholds(landLerpMap[baseX + xN * chunkPixelStep, baseZ + (zN + 1) * chunkPixelStep], terrainThresholdsX2);
+                            LoadInterpolatedThresholds(landLerpMap[baseX + (xN + 1) * chunkPixelStep, baseZ + (zN + 1) * chunkPixelStep], terrainThresholdsX3);
+
+                            // Oceanicity/Upheaval Y displacements
+                            float distY0 = distY[NoiseIndex2d(xN, zN)];
+                            float distY1 = distY[NoiseIndex2d(xN + 1, zN)];
+                            float distY2 = distY[NoiseIndex2d(xN, zN + 1)];
+                            float distY3 = distY[NoiseIndex2d(xN + 1, zN + 1)];
+
+                            for (int yN = 0; yN < noiseHeight; yN++)
+                            {
+                                // Terrain noise
+                                tnoiseY0 = terrainNoise3d[NoiseIndex3d(xN, yN, zN)];
+                                tnoiseY1 = terrainNoise3d[NoiseIndex3d(xN, yN, zN + 1)];
+                                tnoiseY2 = terrainNoise3d[NoiseIndex3d(xN + 1, yN, zN)];
+                                tnoiseY3 = terrainNoise3d[NoiseIndex3d(xN + 1, yN, zN + 1)];
+
+                                tnoiseGainY0 = (terrainNoise3d[NoiseIndex3d(xN, yN + 1, zN)] - tnoiseY0) * lerpDeltaVert;
+                                tnoiseGainY1 = (terrainNoise3d[NoiseIndex3d(xN, yN + 1, zN + 1)] - tnoiseY1) * lerpDeltaVert;
+                                tnoiseGainY2 = (terrainNoise3d[NoiseIndex3d(xN + 1, yN + 1, zN)] - tnoiseY2) * lerpDeltaVert;
+                                tnoiseGainY3 = (terrainNoise3d[NoiseIndex3d(xN + 1, yN + 1, zN + 1)] - tnoiseY3) * lerpDeltaVert;
+
+                                for (int y = 0; y < lerpVer; y++)
+                                {
+                                    int posY = yN * lerpVer + y;
+                                    int chunkY = posY / chunksize;
+                                    int localY = posY % chunksize;
+                                    IChunkBlocks chunkBlockData = chunks[chunkY].Data;
+
+                                    if (posY == 0)
+                                    {
+                                        int chunkIndex = ChunkIndex3d(xN * lerpHor, localY, zN * lerpHor);
+                                        chunkBlockData.SetBlockBulk(chunkIndex, lerpHor, lerpHor, GlobalConfig.mantleBlockId);
+                                    }
+                                    else
+                                    {
+                                        // For Terrain noise 
+                                        double tnoiseX0 = tnoiseY0;
+                                        double tnoiseX1 = tnoiseY1;
+
+                                        double tnoiseGainX0 = (tnoiseY2 - tnoiseY0) * lerpDeltaHor;
+                                        double tnoiseGainX1 = (tnoiseY3 - tnoiseY1) * lerpDeltaHor;
+
+                                        thNoiseX0 = SampleDisplacedYThreshold(posY + distY0, mapsizeYm2, terrainThresholdsX0);
+                                        thNoiseX1 = SampleDisplacedYThreshold(posY + distY2, mapsizeYm2, terrainThresholdsX2);
+                                        double thNoiseY2 = SampleDisplacedYThreshold(posY + distY1, mapsizeYm2, terrainThresholdsX1);
+                                        double thNoiseY3 = SampleDisplacedYThreshold(posY + distY3, mapsizeYm2, terrainThresholdsX3);
+
+                                        if (posY >= TerraGenConfig.seaLevel && Math.Max(Math.Max(tnoiseY0, tnoiseY1), Math.Max(tnoiseY2, tnoiseY3)) <= Math.Min(Math.Min(thNoiseX0, thNoiseX1), Math.Min(thNoiseY2, thNoiseY3)))
+                                        {
+                                            // Nothing to do: whole slice is air
+                                        }
+                                        else
+                                        {
+                                            thNoiseGainX0 = (thNoiseY2 - thNoiseX0) * lerpDeltaHor;
+                                            thNoiseGainX1 = (thNoiseY3 - thNoiseX1) * lerpDeltaHor;
+
+                                            for (int x = 0; x < lerpHor; x++)
+                                            {
+                                                // For terrain noise
+                                                double tnoiseZ0 = tnoiseX0;
+                                                double tnoiseGainZ0 = (tnoiseX1 - tnoiseX0) * lerpDeltaHor;
+
+                                                // Landform
+                                                thNoiseZ0 = thNoiseX0;
+                                                thNoiseGainZ0 = (thNoiseX1 - thNoiseX0) * lerpDeltaHor;
+
+                                                int lX = xN * lerpHor + x;
+
+                                                for (int z = 0; z < lerpHor; z++)
+                                                {
+                                                    int lZ = zN * lerpHor + z;
+
+                                                    // Geo Upheaval modifier for threshold
+                                                    double distYHere = GameMath.BiLerp(distY0, distY2, distY1, distY3, x * lerpDeltaHor, z * lerpDeltaHor);
+                                                    double geoUpheavalTaper = ComputeGeoUpheavalTaper(posY, distYHere, taperThreshold, geoUpheavalAmplitude, mapsizeY);
+
+                                                    if (tnoiseZ0 > thNoiseZ0 + geoUpheavalTaper)
+                                                    {
+                                                        int mapIndex = ChunkIndex2d(lX, lZ);
+                                                        terrainheightmap[mapIndex] = (ushort)posY;
+                                                        rainheightmap[mapIndex] = (ushort)posY;
+
+                                                        chunkBlockData[ChunkIndex3d(lX, localY, lZ)] = rockID;
+                                                    }
+                                                    else if (posY < TerraGenConfig.seaLevel)
+                                                    {
+                                                        int mapIndex = ChunkIndex2d(lX, lZ);
+                                                        rainheightmap[mapIndex] = (ushort)posY;
+
+                                                        int blockId;
+                                                        if (posY == TerraGenConfig.seaLevel - 1)
+                                                        {
+                                                            int temp = (GameMath.BiLerpRgbColor(((float)lX) / chunksize, ((float)lZ) / chunksize, climateUpLeft, climateUpRight, climateBotLeft, climateBotRight) >> 16) & 0xff;
+                                                            float distort = (float)distort2dx.Noise(chunkX * chunksize + lX, chunkZ * chunksize + lZ) / 20f;
+                                                            float tempf = TerraGenConfig.GetScaledAdjustedTemperatureFloat(temp, 0) + distort;
+
+                                                            blockId = (tempf < TerraGenConfig.WaterFreezingTempOnGen) ? GlobalConfig.lakeIceBlockId : waterID;
+                                                        }
+                                                        else
+                                                        {
+                                                            blockId = waterID;
+                                                        }
+
+                                                        chunkBlockData.SetFluid(ChunkIndex3d(lX, localY, lZ), blockId);
+                                                    }
+
+                                                    tnoiseZ0 += tnoiseGainZ0;
+                                                    thNoiseZ0 += thNoiseGainZ0;
+                                                }
+
+                                                tnoiseX0 += tnoiseGainX0;
+                                                thNoiseX0 += thNoiseGainX0;
+
+                                                tnoiseX1 += tnoiseGainX1;
+                                                thNoiseX1 += thNoiseGainX1;
+                                            }
+                                        }
+                                    }
+
+                                    tnoiseY0 += tnoiseGainY0;
+                                    tnoiseY1 += tnoiseGainY1;
+                                    tnoiseY2 += tnoiseGainY2;
+                                    tnoiseY3 += tnoiseGainY3;
+                                }
+                            }
+                        }
+                    }
+                    break;
             }
 
             ushort ymax = 0;
@@ -469,7 +474,6 @@ namespace Vintagestory.ServerMods
         }
 
 
-        
         LerpedWeightedIndex2DMap GetOrLoadLerpedLandformMap(IMapChunk mapchunk, int regionX, int regionZ)
         {
             LerpedWeightedIndex2DMap map;
@@ -479,12 +483,11 @@ namespace Vintagestory.ServerMods
 
             IntDataMap2D lmap = mapchunk.MapRegion.LandformMap;
             // 2. Create
-            map = LandformMapByRegion[regionZ * regionMapSize + regionX] 
+            map = LandformMapByRegion[regionZ * regionMapSize + regionX]
                 = new LerpedWeightedIndex2DMap(lmap.Data, lmap.Size, TerraGenConfig.landFormSmoothingRadius, lmap.TopLeftPadding, lmap.BottomRightPadding);
 
             return map;
         }
-
 
         // Can be called only once per x/z coordinate to get a list of all thresholds for this column
         private void LoadInterpolatedThresholds(WeightedIndex[] indices, float[] values)
@@ -500,9 +503,6 @@ namespace Vintagestory.ServerMods
                 values[y] = threshold;
             }
         }
-
-
-
 
         private void GetInterpolatedOctaves(WeightedIndex[] indices, out double[] amps, out double[] thresholds)
         {
@@ -522,7 +522,7 @@ namespace Vintagestory.ServerMods
 
                 amps[octave] = amplitude;
                 thresholds[octave] = threshold;
-            }    
+            }
         }
 
 
@@ -610,7 +610,7 @@ namespace Vintagestory.ServerMods
 
                     for (int y = 0; y < paddedNoiseHeight; y++)
                     {
-                        noiseTemp[NoiseIndex3d(x, y, z)] = TerrainNoise.Noise(
+                        noiseTemp[NoiseIndex3d(x, y, z)] = terrainNoise.Noise(
                             worldX + distTerrain.X,
                             (yPos + y) * (lerpVer * 0.5 / TerraGenConfig.terrainNoiseVerticalScale),
                             worldZ + distTerrain.Z,
@@ -623,7 +623,6 @@ namespace Vintagestory.ServerMods
 
             return noiseTemp;
         }
-
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
