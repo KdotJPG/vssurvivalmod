@@ -26,6 +26,7 @@ namespace Vintagestory.ServerMods
         const double terrainDistortionThreshold = 40.0;
         const double geoDistortionMultiplier = 10.0;
         const double geoDistortionThreshold = 10.0;
+        const double maxDistortionAmount = (55 + 40 + 30 + 10) * SimplexNoiseOctave.MAX_VALUE_2D_WARP;
 
         LandformsWorldProperty landforms;
         Dictionary<int, LerpedWeightedIndex2DMap> LandformMapByRegion = new Dictionary<int, LerpedWeightedIndex2DMap>(10);
@@ -63,6 +64,7 @@ namespace Vintagestory.ServerMods
         float[] distY;
         [Obsolete] int previouslyPaddedNoiseWidth;
         [Obsolete] float previouslyWeirdMultiplier;
+        [Obsolete] bool useOldWarpForTrilerpTerrainNoise;
 
 
         public override bool ShouldLoad(EnumAppSide side)
@@ -151,19 +153,6 @@ namespace Vintagestory.ServerMods
                     distY = new float[paddedNoiseWidth * paddedNoiseWidth];
                     break;
             }
-            
-            // Until v1.18.0, a few key calculations used paddedNoiseWidth when they should have used noiseWidth.
-            // If trilerp is still enabled, then this will fix that from now on.
-            if (GameVersion.IsAtLeastVersion(api.WorldManager.SaveGame.CreatedGameVersion, "1.18.0-pre.1"))
-            {
-                previouslyPaddedNoiseWidth = noiseWidth;
-                previouslyWeirdMultiplier = 1.0f;
-            }
-            else
-            {
-                previouslyPaddedNoiseWidth = paddedNoiseWidth;
-                previouslyWeirdMultiplier = (float)lerpHor / chunksize + 1.0f;
-            }
 
             terrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
                 terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
@@ -184,6 +173,21 @@ namespace Vintagestory.ServerMods
                 api.World.Seed + 9876 + 1
             );
             geoOceanNoise = NormalizedSimplexNoise.FromDefaultOctaves(6, 1 / 60.0, 0.8, api.World.Seed + 9856 + 1);
+
+            // Until v1.18.0, a few key calculations used paddedNoiseWidth when they should have used noiseWidth.
+            // If trilerp is still enabled, then this will fix that from now on. Also enable new distortion.
+            if (GameVersion.IsAtLeastVersion(api.WorldManager.SaveGame.CreatedGameVersion, "1.18.0-pre.1"))
+            {
+                previouslyPaddedNoiseWidth = noiseWidth;
+                previouslyWeirdMultiplier = 1.0f;
+                useOldWarpForTrilerpTerrainNoise = false;
+            }
+            else
+            {
+                previouslyPaddedNoiseWidth = paddedNoiseWidth;
+                previouslyWeirdMultiplier = (float)lerpHor / chunksize + 1.0f;
+                useOldWarpForTrilerpTerrainNoise = true;
+            }
 
             // Find a non-oceanic spot
             if (api.WorldManager.SaveGame.IsNew && oceanicityStrengthInv < 1)
@@ -316,9 +320,11 @@ namespace Vintagestory.ServerMods
                             }
 
                             // Create that directional compression effect.
-                            VectorXZ dist = DistortionNoise(worldX, worldZ);
-                            VectorXZ distTerrain = ApplyDistortionThreshold(dist * terrainDistortionMultiplier, terrainDistortionThreshold);
-                            VectorXZ distGeo = ApplyDistortionThreshold(dist * geoDistortionMultiplier, geoDistortionThreshold);
+                            VectorXZ dist = NewDistortionNoise(worldX, worldZ);
+                            VectorXZ distTerrain = ApplyIsotropicDistortionThreshold(dist * terrainDistortionMultiplier, terrainDistortionThreshold,
+                                terrainDistortionMultiplier * maxDistortionAmount);
+                            VectorXZ distGeo = ApplyIsotropicDistortionThreshold(dist * geoDistortionMultiplier, geoDistortionThreshold,
+                                geoDistortionMultiplier * maxDistortionAmount);
 
                             // Get Y distortion from oceanicity and upheaval
                             float upHeavalStrength = GameMath.BiLerp(upheavalMapUpLeft, upheavalMapUpRight, upheavalMapBotLeft, upheavalMapBotRight, lX * chunkBlockDelta, lZ * chunkBlockDelta);
@@ -437,8 +443,8 @@ namespace Vintagestory.ServerMods
                     {
                         for (int zN = 0; zN < paddedNoiseWidth; zN++)
                         {
-                            VectorXZ distGeo = DistortionNoise(chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor);
-                            distGeo = ApplyDistortionThreshold(distGeo * geoDistortionMultiplier, geoDistortionThreshold);
+                            VectorXZ distGeo = NewDistortionNoise(chunkX * chunksize + xN * lerpHor, chunkZ * chunksize + zN * lerpHor);
+                            distGeo = ApplyIsotropicDistortionThreshold(distGeo * geoDistortionMultiplier, geoDistortionThreshold, geoDistortionMultiplier * maxDistortionAmount);
 
                             float upheavalStrength = GameMath.BiLerp(upheavalMapUpLeft, upheavalMapUpRight, upheavalMapBotLeft, upheavalMapBotRight,
                                 xN * (1.0f / noiseWidth), zN * (1.0f / noiseWidth));
@@ -705,7 +711,8 @@ namespace Vintagestory.ServerMods
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        VectorXZ DistortionNoise(double worldX, double worldZ)
+        [Obsolete]
+        VectorXZ OldDistortionNoise(double worldX, double worldZ)
         {
             double noiseX = worldX / 400.0;
             double noiseZ = worldZ / 400.0;
@@ -715,10 +722,49 @@ namespace Vintagestory.ServerMods
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        VectorXZ ApplyDistortionThreshold(VectorXZ dist, double threshold)
+        [Obsolete]
+        VectorXZ ApplyOldDistortionThreshold(VectorXZ dist, double threshold)
         {
             dist.X = dist.X > 0 ? Math.Max(0, dist.X - threshold) : Math.Min(0, dist.X + threshold);
             dist.Z = dist.Z > 0 ? Math.Max(0, dist.Z - threshold) : Math.Min(0, dist.Z + threshold);
+            return dist;
+        }
+
+        // Closesly matches the old two-noise distortion in a given seed, but is more fair to all angles.
+        VectorXZ NewDistortionNoise(double worldX, double worldZ)
+        {
+            double noiseX = worldX / 400.0;
+            double noiseZ = worldZ / 400.0;
+            SimplexNoise.NoiseFairWarpVector(distort2dx, distort2dz, noiseX, noiseZ, out double distX, out double distZ);
+            return new VectorXZ { X = distX, Z = distZ };
+        }
+
+        // Cuts off the distortion in a circle rather than a square.
+        // Between this and the new distortion noise, this makes the bigger difference.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        VectorXZ ApplyIsotropicDistortionThreshold(VectorXZ dist, double threshold, double maximum)
+        {
+            double distMagnitudeSquared = dist.X * dist.X + dist.Z * dist.Z;
+            double thresholdSquared = threshold * threshold;
+            if (distMagnitudeSquared <= thresholdSquared) dist.X = dist.Z = 0;
+            else
+            {
+                // `slide` is 0 to 1 between `threshold` and `maximum` (input vector magnitude)
+                double baseCurve = (distMagnitudeSquared - thresholdSquared) / distMagnitudeSquared;
+                double maximumSquared = maximum * maximum;
+                double baseCurveReciprocalAtMaximum = maximumSquared / (maximumSquared - thresholdSquared);
+                double slide = baseCurve * baseCurveReciprocalAtMaximum;
+
+                // Let  `slide` be smooth to start.
+                slide *= slide;
+
+                // `forceDown` needs to make `dist` zero at `threshold`
+                // and `expectedOutputMaximum` at `maximum`.
+                double expectedOutputMaximum = maximum - threshold;
+                double forceDown = slide * (expectedOutputMaximum / maximum);
+
+                dist *= forceDown;
+            }
             return dist;
         }
 
@@ -740,8 +786,18 @@ namespace Vintagestory.ServerMods
                     int worldX = gridX * lerpHor;
                     int worldZ = gridZ * lerpHor;
 
-                    VectorXZ distTerrain = DistortionNoise(worldX, worldZ);
-                    distTerrain = ApplyDistortionThreshold(distTerrain * terrainDistortionMultiplier, terrainDistortionThreshold);
+                    VectorXZ distTerrain;
+                    if (useOldWarpForTrilerpTerrainNoise)
+                    {
+                        distTerrain = OldDistortionNoise(worldX, worldZ);
+                        distTerrain = ApplyOldDistortionThreshold(distTerrain * terrainDistortionMultiplier, terrainDistortionThreshold);
+                    }
+                    else
+                    {
+                        distTerrain = NewDistortionNoise(worldX, worldZ);
+                        distTerrain = ApplyIsotropicDistortionThreshold(distTerrain * terrainDistortionMultiplier, terrainDistortionThreshold,
+                            terrainDistortionMultiplier * maxDistortionAmount);
+                    }
 
                     for (int y = 0; y < paddedNoiseHeight; y++)
                     {
