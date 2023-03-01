@@ -194,25 +194,42 @@ namespace Vintagestory.ServerMods
             {
                 var rnd = new Random(api.World.Seed + 2837986);
                 BlockPos pos = new BlockPos(api.WorldManager.MapSizeX / 2, 0, api.WorldManager.MapSizeZ / 2);
+                const int maxTries = 4000;
+                const double maxRadiusToTry = 48000.0 / 400.0;
                 int tries = 0;
 
-                while (tries++ < 4000)
+                double lowestValueSoFar = double.PositiveInfinity;
+                while (tries++ < maxTries)
                 {
-                    continentalNoiseOffsetX = (10 * tries) / 400.0 * (1 - 2 * rnd.Next(2));
-                    continentalNoiseOffsetZ = (10 * tries) / 400.0 * (1 - 2 * rnd.Next(2));
+                    // Let the area of the circle grow constantly, rather than the radius.
+                    double areaCorrectedSlide = GameMath.Sqrt(tries * (1.0 / maxTries));
+                    double maxRadiusThisAttempt = areaCorrectedSlide * maxRadiusToTry;
 
-                    var noiseVal = (int)Math.Max(0, 255 * Math.Min(1, 2 * geoOceanNoise.Noise(
-                        continentalNoiseOffsetX + pos.X / 400.0,
-                        continentalNoiseOffsetZ + pos.Z / 400.0
-                    ) - oceanicityStrengthInv));
+                    // Uniform choice within circle.
+                    double rndRadius = (1 - Math.Abs(rnd.NextDouble() - rnd.NextDouble())) * maxRadiusThisAttempt;
+                    double rndAngle = rnd.NextDouble() * GameMath.TWOPI;
+                    double offsetX = rndRadius * GameMath.Sin(rndAngle);
+                    double offsetZ = rndRadius * GameMath.Cos(rndAngle);
 
-                    if (noiseVal <= 0)
+                    // Get the noise without any clamping.
+                    // This way, if we can't manage to find a value below zero,
+                    // we can at least return the offset that produced the smallest positive one.
+                    double noiseVal = 2 * geoOceanNoise.Noise(
+                        offsetX + pos.X / 400.0,
+                        offsetZ + pos.Z / 400.0
+                    ) - oceanicityStrengthInv;
+
+                    if (noiseVal <= lowestValueSoFar)
                     {
-                        api.WorldManager.SaveGame.StoreData<double>("continentalNoiseOffsetX", continentalNoiseOffsetX);
-                        api.WorldManager.SaveGame.StoreData<double>("continentalNoiseOffsetZ", continentalNoiseOffsetZ);
-                        break;
+                        lowestValueSoFar = noiseVal;
+                        continentalNoiseOffsetX = offsetX;
+                        continentalNoiseOffsetZ = offsetZ;
+                        if (noiseVal <= 0)
+                            break;
                     }
                 }
+                api.WorldManager.SaveGame.StoreData<double>("continentalNoiseOffsetX", continentalNoiseOffsetX);
+                api.WorldManager.SaveGame.StoreData<double>("continentalNoiseOffsetZ", continentalNoiseOffsetZ);
             }
 
             api.Logger.VerboseDebug("Initialised GenTerra (Mode={0})", mode);
