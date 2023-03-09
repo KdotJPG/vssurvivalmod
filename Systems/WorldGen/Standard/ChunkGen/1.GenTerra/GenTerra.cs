@@ -39,6 +39,7 @@ namespace Vintagestory.ServerMods
         float oceanicityStrengthInv;
 
         NormalizedSimplexNoise terrainNoise;
+        NewNormalizedSimplexFractalNoise newTerrainNoise;
         SimplexNoise distort2dx;
         SimplexNoise distort2dz;
         NormalizedSimplexNoise geoUpheavalNoise;
@@ -137,9 +138,15 @@ namespace Vintagestory.ServerMods
             switch (mode)
             {
                 case Mode.FullNoise:
+                    newTerrainNoise = NewNormalizedSimplexFractalNoise.FromDefaultOctaves(
+                        terrainGenOctaves, 0.0005 * NewSimplexNoiseLayer.OldToNewFrequency / noiseScale, 0.9, api.WorldManager.Seed
+                    );
                     break;
 
                 case Mode.GridTrilerp:
+                    terrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
+                        terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
+                    );
                     noiseWidth = chunksize / lerpHor;
                     noiseHeight = api.WorldManager.MapSizeY / lerpVer;
                     paddedNoiseWidth = noiseWidth + 1;
@@ -154,9 +161,6 @@ namespace Vintagestory.ServerMods
                     break;
             }
 
-            terrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
-                terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
-            );
             distort2dx = new SimplexNoise(
                 new double[] { 55, 40, 30, 10 },
                 scaleAdjustedFreqs(new double[] { 1 / 5.0, 1 / 2.50, 1 / 1.250, 1 / 0.65 }, noiseScale),
@@ -348,7 +352,7 @@ namespace Vintagestory.ServerMods
                             float distY = ComputeOceanAndUpheavalDistY(upHeavalStrength, worldX, worldZ, distGeo);
 
                             // Prepare the noise for the entire column.
-                            NormalizedSimplexNoise.ColumnNoise columnNoise = terrainNoise.ForColumn(verticalNoiseRelativeFrequency, lerpedAmps, lerpedTh, worldX + distTerrain.X, worldZ + distTerrain.Z);
+                            NewNormalizedSimplexFractalNoise.ColumnNoise columnNoise = newTerrainNoise.ForColumn(verticalNoiseRelativeFrequency, lerpedAmps, lerpedTh, worldX + distTerrain.X, worldZ + distTerrain.Z);
 
                             int chunkY = 0;
                             int lY = 1;
