@@ -27,7 +27,7 @@ namespace Vintagestory.ServerMods
         float noiseScale;
         int terrainGenOctaves = 9;
 
-        NormalizedSimplexNoise terrainNoise;
+        NewNormalizedSimplexFractalNoise terrainNoise;
         SimplexNoise distort2dx;
         SimplexNoise distort2dz;
         NormalizedSimplexNoise geoUpheavalNoise;
@@ -77,8 +77,8 @@ namespace Vintagestory.ServerMods
             lerpedTh = new double[terrainGenOctaves];
 
 
-            terrainNoise = NormalizedSimplexNoise.FromDefaultOctaves(
-                terrainGenOctaves, 0.0005 / noiseScale, 0.9, api.WorldManager.Seed
+            terrainNoise = NewNormalizedSimplexFractalNoise.FromDefaultOctaves(
+                terrainGenOctaves, 0.0005 * NewSimplexNoiseLayer.OldToNewFrequency / noiseScale, 0.9, api.WorldManager.Seed
             );
             distort2dx = new SimplexNoise(
                 new double[] { 55, 40, 30, 10 },
@@ -232,7 +232,7 @@ namespace Vintagestory.ServerMods
                     }*/
 
                     // Prepare the noise for the entire column.
-                    NormalizedSimplexNoise.ColumnNoise columnNoise = terrainNoise.ForColumn(verticalNoiseRelativeFrequency, lerpedAmps, lerpedTh, worldX + distTerrain.X, worldZ + distTerrain.Z);
+                    NewNormalizedSimplexFractalNoise.ColumnNoise columnNoise = terrainNoise.ForColumn(verticalNoiseRelativeFrequency, lerpedAmps, lerpedTh, worldX + distTerrain.X, worldZ + distTerrain.Z);
 
                     int chunkY = 0;
                     int lY = 1;
